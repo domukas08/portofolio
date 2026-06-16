@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nettside 3D</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #4a5568;
+        font-family: system-ui, -apple-system, sans-serif;
+        color: #e8eaed;
+      }
+
+      #canvas-container {
+        width: 100%;
+        height: 100%;
+      }
+
+      #hint {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        padding: 10px 14px;
+        background: rgba(30, 35, 42, 0.82);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        pointer-events: none;
+        backdrop-filter: blur(8px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-container"></div>
+    <div id="hint"><strong>Dra</strong> for å rotere</div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+      const DOT_NEON_COLORS = [
+        "#ff6b9d",
+        "#5ec8ff",
+        "#7dff9a",
+        "#ffb347",
+        "#b47dff",
+        "#5eead4",
+        "#ff7b7b",
+        "#c4f06a",
+        "#f472b6",
+        "#60a5fa",
+        "#fbbf24",
+        "#a78bfa",
+        "#34d399",
+        "#fb7185",
+        "#38bdf8",
+        "#facc15",
+        "#e879f9",
+        "#4ade80",
+        "#f97316",
+        "#22d3ee",
+      ];
+
+      const container = document.getElementById("canvas-container");
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#4a5568");
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
+      );
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      container.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.enablePan = false;
+      controls.enableZoom = false;
+      controls.target.set(0, 0, 0);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.42));
+      const keyLight = new THREE.DirectionalLight(0xffffff, 0.65);
+      keyLight.position.set(4, 6, 3);
+      scene.add(keyLight);
+      const fillLight = new THREE.DirectionalLight(0xdce6f5, 0.28);
+      fillLight.position.set(-3, 2, -2);
+      scene.add(fillLight);
+
+      const modelRoot = new THREE.Group();
+      scene.add(modelRoot);
+
+      const cameraDistance = 3;
+
+      function fitModel(object) {
+        const box = new THREE.Box3().setFromObject(object);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+
+        object.position.sub(center);
+
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) {
+          object.scale.setScalar(2 / maxDim);
+        }
+
+        controls.target.set(0, 0, 0);
+        camera.position.set(0, 0, cameraDistance);
+        camera.lookAt(0, 0, 0);
+        controls.minDistance = cameraDistance;
+        controls.maxDistance = cameraDistance;
+        controls.update();
+      }
+
+      function findTriangleIslands(geometry) {
+        const index = geometry.index;
+        if (!index) return [];
+
+        const triangleCount = index.count / 3;
+        const vertexToTriangles = new Map();
+
+        for (let t = 0; t < triangleCount; t++) {
+          for (let v = 0; v < 3; v++) {
+            const vi = index.getX(t * 3 + v);
+            if (!vertexToTriangles.has(vi)) vertexToTriangles.set(vi, []);
+            vertexToTriangles.get(vi).push(t);
+          }
+        }
+
+        const neighbors = Array.from({ length: triangleCount }, () => []);
+        for (let t = 0; t < triangleCount; t++) {
+          const seen = new Set();
+          for (let v = 0; v < 3; v++) {
+            const vi = index.getX(t * 3 + v);
+            for (const nt of vertexToTriangles.get(vi)) {
+              if (nt !== t) seen.add(nt);
+            }
+          }
+          neighbors[t] = [...seen];
+        }
+
+        const visited = new Uint8Array(triangleCount);
+        const islands = [];
+
+        for (let t = 0; t < triangleCount; t++) {
+          if (visited[t]) continue;
+          const island = [];
+          const stack = [t];
+          visited[t] = 1;
+          while (stack.length) {
+            const cur = stack.pop();
+            island.push(cur);
+            for (const n of neighbors[cur]) {
+              if (!visited[n]) {
+                visited[n] = 1;
+                stack.push(n);
+              }
+            }
+          }
+          islands.push(island);
+        }
+
+        return islands;
+      }
+
+      function extractIslandGeometry(sourceGeometry, triangleIndices) {
+        const srcIndex = sourceGeometry.index;
+        const srcPos = sourceGeometry.attributes.position;
+        const vertexMap = new Map();
+        const newPositions = [];
+        const newIndices = [];
+
+        for (const t of triangleIndices) {
+          const tri = [];
+          for (let v = 0; v < 3; v++) {
+            const oldVi = srcIndex.getX(t * 3 + v);
+            let newVi;
+            if (vertexMap.has(oldVi)) {
+              newVi = vertexMap.get(oldVi);
+            } else {
+              newVi = newPositions.length / 3;
+              vertexMap.set(oldVi, newVi);
+              newPositions.push(
+                srcPos.getX(oldVi),
+                srcPos.getY(oldVi),
+                srcPos.getZ(oldVi)
+              );
+            }
+            tri.push(newVi);
+          }
+          newIndices.push(...tri);
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(newPositions, 3)
+        );
+        geo.setIndex(newIndices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function isMainSphere(mesh) {
+        const vertCount = mesh.geometry?.attributes?.position?.count ?? 0;
+        const materials = mesh.material
+          ? Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material]
+          : [];
+        return (
+          vertCount <= 64 ||
+          materials.some((mat) => mat?.name === "Material.002")
+        );
+      }
+
+      function styleMainSphere(mesh) {
+        mesh.material = new THREE.MeshPhysicalMaterial({
+          color: new THREE.Color("#000000"),
+          roughness: 1,
+          metalness: 0,
+          envMapIntensity: 0,
+        });
+
+        const edges = new THREE.EdgesGeometry(mesh.geometry, 1);
+
+        const glowLines = new THREE.LineSegments(
+          edges,
+          new THREE.LineBasicMaterial({
+            color: "#ffffff",
+            transparent: true,
+            opacity: 0.22,
+            depthWrite: false,
+          })
+        );
+        glowLines.scale.setScalar(1.008);
+        glowLines.renderOrder = 2;
+
+        const coreLines = new THREE.LineSegments(
+          edges,
+          new THREE.LineBasicMaterial({
+            color: "#f8fbff",
+            transparent: true,
+            opacity: 0.92,
+          })
+        );
+        coreLines.renderOrder = 3;
+
+        mesh.add(glowLines);
+        mesh.add(coreLines);
+      }
+
+      function styleDotSpheres(mesh) {
+        const geometry = mesh.geometry;
+        const islands = findTriangleIslands(geometry);
+        const group = new THREE.Group();
+        group.position.copy(mesh.position);
+        group.quaternion.copy(mesh.quaternion);
+        group.scale.copy(mesh.scale);
+
+        islands.forEach((island, i) => {
+          const islandGeo = extractIslandGeometry(geometry, island);
+          const color = new THREE.Color(
+            DOT_NEON_COLORS[i % DOT_NEON_COLORS.length]
+          );
+          const dotMesh = new THREE.Mesh(
+            islandGeo,
+            new THREE.MeshPhysicalMaterial({
+              color,
+              roughness: 0.26,
+              metalness: 0.2,
+              emissive: color.clone().multiplyScalar(0.5),
+              emissiveIntensity: 0.26,
+              transparent: true,
+              opacity: 0.94,
+            })
+          );
+          group.add(dotMesh);
+        });
+
+        if (mesh.parent) {
+          mesh.parent.add(group);
+          mesh.parent.remove(mesh);
+        }
+
+        mesh.geometry.dispose();
+        if (mesh.material) mesh.material.dispose();
+      }
+
+      function applyVisualStyle(root) {
+        root.traverse((child) => {
+          if (!child.isMesh) return;
+
+          if (isMainSphere(child)) {
+            styleMainSphere(child);
+          } else {
+            styleDotSpheres(child);
+          }
+        });
+      }
+
+      const loader = new GLTFLoader();
+      loader.load(
+        "./assets/nettside.glb",
+        (gltf) => {
+          applyVisualStyle(gltf.scene);
+          modelRoot.add(gltf.scene);
+          fitModel(gltf.scene);
+        },
+        undefined,
+        (error) => {
+          console.error("Failed to load model:", error);
+          const hint = document.getElementById("hint");
+          hint.innerHTML =
+            "Kunne ikke laste modellen. Kjør export.bat og last siden på nytt.";
+          hint.style.color = "#ff6b6b";
+        }
+      );
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      window.addEventListener("resize", onResize);
+
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      animate();
+    </script>
+  </body>
+</html>

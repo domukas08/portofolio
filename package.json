@@ -1,0 +1,10 @@
+{
+  "name": "ny-nettside",
+  "private": true,
+  "scripts": {
+    "start": "live-server --port=3000 --open=index.html"
+  },
+  "devDependencies": {
+    "live-server": "^1.2.2"
+  }
+}
